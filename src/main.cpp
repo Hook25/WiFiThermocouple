@@ -19,6 +19,7 @@
 #define THERMO_DO D0
 #define THERMO_CS D1
 #define THERMO_CLK D2
+#define MIN_REPORT_INTERVAL_S 30
 MAX6675 thermocouple(THERMO_CLK, THERMO_CS, THERMO_DO);
 
 WiFiClient client;
@@ -62,21 +63,35 @@ void setup() {
   mqtt.begin(BROKER_ADDR, MQTT_USR, MQTT_PWD);
 }
 
-float last_read_temperature = 0;
+float last_reported_temperature = 0;
+float moving_average_temperature = 0;
+float last_report_time = 0;
+
+inline float exponential_moving_average(float current, float previous, float factor){
+  return current * factor + (1 - factor) * previous;
+}
 
 void loop() {
+  device.setAvailability(true);
   mqtt.loop();
-  delay(10000);
+  delay(3000);
 
-  float temperature = thermocouple.readCelsius();
-  if (abs(temperature - last_read_temperature) > 1) {
-    int32_t rssi = WiFi.RSSI();
-    temperatureSensor.setValue(temperature);
-    signalSensor.setValue(rssi);
-
-    last_read_temperature = temperature;
-    Serial.printf("Sent temperature: %.1f °C -- rssi: %d dBm\n", last_read_temperature, rssi);
-  } else {
-    Serial.println("Nothing new to report");
+  float curr_temperature = thermocouple.readCelsius();
+  moving_average_temperature = exponential_moving_average(curr_temperature, moving_average_temperature, .2);
+  if (abs(moving_average_temperature - last_reported_temperature) < .5) {
+    Serial.println("Skipping as difference is too little");
+    return;
   }
+  if((millis() - last_report_time) < (MIN_REPORT_INTERVAL_S * 1000)){
+    Serial.printf("Skipping report as last report is too recent, millis %d, last %d\n", (int)millis()/1000, (int)last_report_time/1000);
+    return;
+  }
+  int32_t rssi = WiFi.RSSI();
+  float temperature = round(moving_average_temperature * 100)/100;
+  temperatureSensor.setValue(temperature);
+  signalSensor.setValue(rssi);
+
+  last_reported_temperature = temperature;
+  last_report_time = millis();
+  Serial.printf("Sent temperature: %.1f °C -- rssi: %d dBm\n", last_reported_temperature, rssi);
 }
